@@ -11,9 +11,12 @@ woc_app_def() {
       APP_NAME=Telegram
       ;;
     chromium)
-      # 容器内无 user namespace / GPU：--no-sandbox + 软件渲染；--password-store=basic 免 keyring 弹窗
+      # 容器内无 user namespace / GPU：--no-sandbox + 软件渲染；--password-store=basic 免 keyring 弹窗。
+      # --disable-background-networking：关掉 Chromium 后台 phone-home（GCM 推送 / 组件更新 / 变体下载），
+      #   在受限网络（NAS / 被墙）下这些会反复失败刷屏 "gcm ConnectionHandler failed net error: -2"。
+      #   只影响后台流量，不影响前台网页加载与真实网络错误提示。
       APP_BIN=/usr/bin/chromium
-      APP_LAUNCH="$APP_BIN --no-sandbox --no-first-run --no-default-browser-check --start-maximized --password-store=basic --disable-gpu --user-data-dir=/config/chromium"
+      APP_LAUNCH="$APP_BIN --no-sandbox --no-first-run --no-default-browser-check --start-maximized --password-store=basic --disable-gpu --disable-background-networking --user-data-dir=/config/chromium"
       APP_NAME=Chromium
       ;;
     custom)
