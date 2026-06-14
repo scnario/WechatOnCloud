@@ -1051,12 +1051,16 @@ for (const pub of listInstances()) {
 //   WOC_INSTANCE_MEM_SOFT_MB    soft 阈值；默认 1500
 //   WOC_INSTANCE_MEM_HARD_MB    hard 阈值；默认 2500（也兼容旧名 WOC_INSTANCE_MEM_LIMIT_MB）
 //   WOC_WATCHDOG_INTERVAL_SEC   巡检间隔秒；默认 300（5 分钟），最小 60；0 关闭整个 watchdog
+//   WOC_WATCHDOG_HEALTH_FAILS   VNC 响应性探测：连续无响应几次才重启；默认 0=关闭该探测（仅保留内存自愈）
 const DEFAULT_SOFT_MB = Math.max(0, Number(process.env.WOC_INSTANCE_MEM_SOFT_MB ?? 1500));
 const DEFAULT_HARD_MB = Math.max(
   0,
   Number(process.env.WOC_INSTANCE_MEM_HARD_MB ?? process.env.WOC_INSTANCE_MEM_LIMIT_MB ?? 2500),
 );
 const WATCHDOG_INTERVAL_SEC = Math.max(60, Number(process.env.WOC_WATCHDOG_INTERVAL_SEC ?? 300));
+// VNC 响应性探测默认关闭（=0）。实测健康实例 ~1ms 响应，但偶发宿主级 CPU/IO 争用（如同机重 docker build）
+// 会让探测超时被误判为 stall 而重启正常实例，故默认不启用；需要时设为正整数 N（连续 N 次无响应才重启）开启。
+const HEALTH_FAIL_LIMIT = Math.max(0, Number(process.env.WOC_WATCHDOG_HEALTH_FAILS ?? 0));
 const WATCHDOG_ENABLED = WATCHDOG_INTERVAL_SEC > 0 && (DEFAULT_SOFT_MB > 0 || DEFAULT_HARD_MB > 0);
 
 // 单实例生效阈值：per-instance 覆盖优先；为 undefined 则用 env 默认。
@@ -1077,8 +1081,7 @@ function hasActiveSession(id: string): boolean {
 
 if (WATCHDOG_ENABLED) {
   const recovering = new Set<string>(); // 防重入：自愈期间跳过本实例
-  const healthFails = new Map<string, number>(); // id → 连续无响应次数
-  const HEALTH_FAIL_LIMIT = 2; // 连续 N 次无响应才重启，避免误杀刚启动/瞬时抖动
+  const healthFails = new Map<string, number>(); // id → 连续无响应次数（仅 HEALTH_FAIL_LIMIT>0 时启用）
 
   const recover = async (inst: Instance, reason: string, detail: string) => {
     recovering.add(inst.id);
@@ -1124,18 +1127,21 @@ if (WATCHDOG_ENABLED) {
             app.log.info(`[watchdog] ${inst.containerName} mem=${mb}MiB ≥ soft=${soft}MiB 但用户在使用，延后`);
           }
         }
-        // 2) 响应性自愈（新）：探测 VNC 是否还能提供页面；连续 N 次无响应 → 重启
+        // 2) 响应性自愈：探测 VNC 是否还能提供页面；连续 N 次无响应 → 重启。
         //    应对"进程没死、显示在线，但 I/O/服务 stall 读不出 VNC 文件、永远卡在正在连接桌面"。
-        const healthy = await instanceHttpHealthy(inst);
-        if (healthy) {
-          healthFails.delete(inst.id);
-          continue;
-        }
-        const fails = (healthFails.get(inst.id) || 0) + 1;
-        healthFails.set(inst.id, fails);
-        app.log.warn(`[watchdog] ${inst.containerName} VNC 无响应（连续 ${fails}/${HEALTH_FAIL_LIMIT}）`);
-        if (fails >= HEALTH_FAIL_LIMIT) {
-          await recover(inst, 'unresponsive', `VNC 连续 ${fails} 次无响应（疑似 I/O/服务 stall），自愈重启`);
+        //    默认关闭（HEALTH_FAIL_LIMIT=0）：偶发宿主级争用会误判健康实例为 stall；需要时用 env 开启。
+        if (HEALTH_FAIL_LIMIT > 0) {
+          const healthy = await instanceHttpHealthy(inst);
+          if (healthy) {
+            healthFails.delete(inst.id);
+            continue;
+          }
+          const fails = (healthFails.get(inst.id) || 0) + 1;
+          healthFails.set(inst.id, fails);
+          app.log.warn(`[watchdog] ${inst.containerName} VNC 无响应（连续 ${fails}/${HEALTH_FAIL_LIMIT}）`);
+          if (fails >= HEALTH_FAIL_LIMIT) {
+            await recover(inst, 'unresponsive', `VNC 连续 ${fails} 次无响应（疑似 I/O/服务 stall），自愈重启`);
+          }
         }
       } catch (e: any) {
         app.log.warn(`[watchdog] ${pub.id} 检查异常: ${e?.message || e}`);
@@ -1144,7 +1150,7 @@ if (WATCHDOG_ENABLED) {
   };
   setInterval(() => void tick(), WATCHDOG_INTERVAL_SEC * 1000).unref();
   console.log(
-    `[watchdog] 已启用 · soft=${DEFAULT_SOFT_MB} MiB · hard=${DEFAULT_HARD_MB} MiB · 间隔=${WATCHDOG_INTERVAL_SEC}s · 含响应性探测`,
+    `[watchdog] 已启用 · soft=${DEFAULT_SOFT_MB} MiB · hard=${DEFAULT_HARD_MB} MiB · 间隔=${WATCHDOG_INTERVAL_SEC}s · VNC响应性探测=${HEALTH_FAIL_LIMIT > 0 ? `连续${HEALTH_FAIL_LIMIT}次` : '关闭'}`,
   );
 }
 
