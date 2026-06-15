@@ -361,6 +361,59 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [showVnc]);
 
+  // VNC 连接健康监测 + 自动恢复。kasmweb 会在 iframe 的 <html> 上打连接态 class（noVNC_connected /
+  // noVNC_connecting / noVNC_reconnecting / noVNC_disconnected），同源 iframe 可直接读，可靠。
+  // iframe 已加载、但 VNC 持续 ~15s 不在 connected（卡在"正在连接"、或 noVNC 自动重连反复失败）→ 整页
+  // 重载干净重连，不让用户被晾在"正在连接…超时…无响应"。sessionStorage 限流：2 分钟内最多自动重连 2 次，
+  // 避免实例服务端真卡死时陷入无限重载（那种情况需重启实例，下面会停手）。
+  useEffect(() => {
+    if (!showVnc || !frameLoaded || !id) return;
+    const KEY = 'woc_vncReload_' + id;
+    let badSince = 0;
+    const t = window.setInterval(() => {
+      let connected: boolean | null = null;
+      try {
+        const html = frameRef.current?.contentDocument?.documentElement;
+        if (html) connected = html.classList.contains('noVNC_connected');
+      } catch {
+        return; // 理论上同源；偶发不可读则跳过本次
+      }
+      if (connected === null) return;
+      if (connected) {
+        badSince = 0;
+        try {
+          sessionStorage.removeItem(KEY);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      if (!badSince) {
+        badSince = Date.now();
+        return;
+      }
+      if (Date.now() - badSince < 15000) return;
+      badSince = 0;
+      let rec = { n: 0, t: 0 };
+      try {
+        rec = JSON.parse(sessionStorage.getItem(KEY) || '{"n":0,"t":0}');
+      } catch {
+        /* ignore */
+      }
+      if (Date.now() - rec.t > 120000) rec.n = 0; // 出 2 分钟窗口重置计数
+      if (rec.n >= 2) return; // 自动重连 2 次仍连不上 → 多半是实例服务端卡死，停手（用户需重启实例）
+      rec.n += 1;
+      rec.t = Date.now();
+      try {
+        sessionStorage.setItem(KEY, JSON.stringify(rec));
+      } catch {
+        /* ignore */
+      }
+      window.location.reload();
+    }, 3000);
+    return () => window.clearInterval(t);
+  }, [showVnc, frameLoaded, id]);
+
   if (!id) {
     nav('/', { replace: true });
     return null;
