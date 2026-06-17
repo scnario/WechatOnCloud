@@ -73,6 +73,7 @@ import {
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isRequestHostAllowed } from './host-guard.js';
 import { CURRENT_VERSION, versionInfo, ensureChecked, checkForUpdate, startUpdateChecker } from './version.js';
+import { triggerSelfUpdate } from './self-update.js';
 import { appendInstanceLog, readInstanceLog, appendPanelLog, readPanelLog, pruneOldLogs, filterSince, rangeToMs, DIAG_RANGES } from './logs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -184,6 +185,19 @@ app.get('/api/version', async (req, reply) => {
 app.post('/api/admin/version/check', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   return await checkForUpdate();
+});
+
+// 一键更新面板自身（管理员）：拉新镜像 → 派生 helper 容器重建 woc-panel（带健康检查 + 失败回滚）。
+// 返回后面板会在十几秒内被 helper 重启，前端提示用户稍候刷新。
+app.post('/api/admin/version/self-update', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  try {
+    const { target } = await triggerSelfUpdate();
+    return { ok: true, target, message: '已开始更新：面板将在十几秒内重启为新版本，请稍候刷新页面' };
+  } catch (e: any) {
+    appendPanelLog('ERROR', `面板自更新失败：${e?.message || e}`);
+    return reply.code(500).send({ error: '更新失败：' + (e?.message || e) });
+  }
 });
 
 // ---------- 自助改密 ----------
